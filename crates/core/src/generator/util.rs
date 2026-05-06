@@ -118,7 +118,11 @@ pub fn complete_tx_request(
             tx_req.gas_price = Some(gas_price);
         }
         TxType::Eip1559 => {
-            tx_req.max_fee_per_gas = Some(gas_price);
+            // EIP-1559 requires max_fee_per_gas >= max_priority_fee_per_gas.
+            // If a fuzzed/explicit priority fee is higher than the sampled
+            // base+tip cap, raise the cap to keep the tx well-formed.
+            let max_fee = gas_price.max(priority_fee);
+            tx_req.max_fee_per_gas = Some(max_fee);
             tx_req.max_priority_fee_per_gas = Some(priority_fee);
             tx_req.chain_id = Some(chain_id);
         }

@@ -940,11 +940,17 @@ where
             .to_owned();
 
         let mut full_tx = tx_req.to_owned().with_nonce(nonce);
+        // honor a per-tx priority fee if the scenario set one (e.g., via
+        // FuzzParam::tx_field = "max_priority_fee_per_gas"); fall back to the
+        // gas_price/10 default otherwise.
+        let priority_fee = tx_req
+            .max_priority_fee_per_gas
+            .unwrap_or(gas_price / 10);
         complete_tx_request(
             &mut full_tx,
             self.tx_type,
             gas_price,
-            gas_price / 10,
+            priority_fee,
             gas_limit,
             self.chain_id,
             blob_gas_price,
@@ -2234,6 +2240,7 @@ pub mod tests {
                         .with_fuzz(&[FuzzParam {
                             param: Some("x".to_string()),
                             value: None,
+                            tx_field: None,
                             min: None,
                             max: None,
                         }])
@@ -2253,6 +2260,7 @@ pub mod tests {
                         .with_fuzz(&[FuzzParam {
                             param: Some("x".to_string()),
                             value: None,
+                            tx_field: None,
                             min: None,
                             max: None,
                         }])
@@ -2272,6 +2280,7 @@ pub mod tests {
                         .with_fuzz(&[FuzzParam {
                             param: Some("x".to_string()),
                             value: None,
+                            tx_field: None,
                             min: None,
                             max: None,
                         }])

@@ -91,6 +91,7 @@ pub mod tests {
                 .with_fuzz(&[FuzzParam {
                     param: Some("x".to_string()),
                     value: None,
+                    tx_field: None,
                     min: None,
                     max: None,
                 }])

@@ -4,7 +4,7 @@ use crate::{
     generator::{
         constants::*,
         error::GeneratorError,
-        function_def::{FunctionCallDefinition, FunctionCallDefinitionStrict, FuzzParam},
+        function_def::{FunctionCallDefinition, FunctionCallDefinitionStrict, FuzzParam, TxField},
         named_txs::{ExecutionRequest, NamedTxRequest, NamedTxRequestBuilder},
         seeder::{SeedValue, Seeder},
         templater::Templater,
@@ -325,6 +325,7 @@ where
             fuzz: funcdef.fuzz.to_owned().unwrap_or_default(),
             kind: funcdef.kind.to_owned(),
             gas_limit: funcdef.gas_limit.to_owned(),
+            max_priority_fee_per_gas: funcdef.max_priority_fee_per_gas.to_owned(),
             sidecar: funcdef.sidecar_data()?,
             authorization: signed_auth.map(|a| vec![a]),
         })
@@ -563,6 +564,11 @@ where
                         let prepare_tx = |req| {
                             let mut args = get_fuzzed_args(req, &canonical_fuzz_map, i)?;
                             let fuzz_tx_value = get_fuzzed_tx_value(req, &canonical_fuzz_map, i)?;
+                            let fuzz_priority_fee = get_fuzzed_max_priority_fee_per_gas(
+                                req,
+                                &canonical_fuzz_map,
+                                i,
+                            )?;
                             // Special handling for WorldID proof generation
                             if req
                                 .kind
@@ -592,6 +598,9 @@ where
 
                             if fuzz_tx_value.is_some() {
                                 req.value = fuzz_tx_value;
+                            }
+                            if fuzz_priority_fee.is_some() {
+                                req.max_priority_fee_per_gas = fuzz_priority_fee;
                             }
 
                             let tx = NamedTxRequest::new(
@@ -711,22 +720,56 @@ fn get_fuzzed_tx_value(
     Ok(None)
 }
 
+/// If a `FuzzParam` with `tx_field = "max_priority_fee_per_gas"` is present,
+/// return the fuzzed wei value (as a decimal string) for `fuzz_idx`.
+fn get_fuzzed_max_priority_fee_per_gas(
+    tx: &FunctionCallDefinition,
+    fuzz_map: &HashMap<String, Vec<U256>>,
+    fuzz_idx: usize,
+) -> Result<Option<String>> {
+    if let Some(fuzz) = &tx.fuzz {
+        for fuzz_param in fuzz {
+            if matches!(fuzz_param.tx_field, Some(TxField::MaxPriorityFeePerGas)) {
+                let values = fuzz_map
+                    .get(MAX_PRIORITY_FEE_KEY)
+                    .ok_or(GeneratorError::ValueFuzzerNotInitialized)?;
+                return Ok(Some(values[fuzz_idx].to_string()));
+            }
+        }
+    }
+    Ok(None)
+}
+
 fn parse_map_key(fuzz: FuzzParam) -> Result<String> {
-    if fuzz.param.is_none() && fuzz.value.is_none() {
+    // exactly one of `param`, `value`, or `tx_field` must be set
+    let set_count = [
+        fuzz.param.is_some(),
+        fuzz.value.is_some(),
+        fuzz.tx_field.is_some(),
+    ]
+    .iter()
+    .filter(|&&b| b)
+    .count();
+    if set_count == 0 {
         return Err(GeneratorError::FuzzMissingParams);
     }
-    if fuzz.param.is_some() && fuzz.value.is_some() {
+    if set_count > 1 {
         return Err(GeneratorError::FuzzConflictingParams);
     }
 
-    let key = match (fuzz.param.as_ref(), fuzz.value) {
-        (Some(param), _) => param.to_owned(),
-        (None, Some(true)) => VALUE_KEY.to_owned(),
-        (None, Some(false)) => return Err(GeneratorError::FuzzValueNeedsParam),
-        _ => return Err(GeneratorError::FuzzInvalid),
-    };
-
-    Ok(key)
+    if let Some(param) = fuzz.param {
+        return Ok(param);
+    }
+    if let Some(field) = fuzz.tx_field {
+        return Ok(match field {
+            TxField::MaxPriorityFeePerGas => MAX_PRIORITY_FEE_KEY.to_owned(),
+        });
+    }
+    match fuzz.value {
+        Some(true) => Ok(VALUE_KEY.to_owned()),
+        Some(false) => Err(GeneratorError::FuzzValueNeedsParam),
+        None => Err(GeneratorError::FuzzInvalid),
+    }
 }
 
 pub fn sign_auth(signer: &PrivateKeySigner, auth: Authorization) -> Result<SignedAuthorization> {
@@ -734,4 +777,70 @@ pub fn sign_auth(signer: &PrivateKeySigner, auth: Authorization) -> Result<Signe
         .sign_hash_sync(&auth.signature_hash())
         .map_err(UtilError::Signer)?;
     Ok(auth.into_signed(auth_sig))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fuzz_param() -> FuzzParam {
+        FuzzParam {
+            param: None,
+            value: None,
+            tx_field: None,
+            min: None,
+            max: None,
+        }
+    }
+
+    #[test]
+    fn parse_map_key_routes_param_by_name() {
+        let mut p = fuzz_param();
+        p.param = Some("guy".to_string());
+        assert_eq!(parse_map_key(p).unwrap(), "guy");
+    }
+
+    #[test]
+    fn parse_map_key_routes_value_to_value_key() {
+        let mut p = fuzz_param();
+        p.value = Some(true);
+        assert_eq!(parse_map_key(p).unwrap(), VALUE_KEY);
+    }
+
+    #[test]
+    fn parse_map_key_routes_tx_field_to_priority_fee_key() {
+        let mut p = fuzz_param();
+        p.tx_field = Some(TxField::MaxPriorityFeePerGas);
+        assert_eq!(parse_map_key(p).unwrap(), MAX_PRIORITY_FEE_KEY);
+    }
+
+    #[test]
+    fn parse_map_key_rejects_param_and_tx_field() {
+        let mut p = fuzz_param();
+        p.param = Some("x".to_string());
+        p.tx_field = Some(TxField::MaxPriorityFeePerGas);
+        assert!(matches!(
+            parse_map_key(p),
+            Err(GeneratorError::FuzzConflictingParams)
+        ));
+    }
+
+    #[test]
+    fn parse_map_key_rejects_value_and_tx_field() {
+        let mut p = fuzz_param();
+        p.value = Some(true);
+        p.tx_field = Some(TxField::MaxPriorityFeePerGas);
+        assert!(matches!(
+            parse_map_key(p),
+            Err(GeneratorError::FuzzConflictingParams)
+        ));
+    }
+
+    #[test]
+    fn parse_map_key_rejects_empty() {
+        assert!(matches!(
+            parse_map_key(fuzz_param()),
+            Err(GeneratorError::FuzzMissingParams)
+        ));
+    }
 }
