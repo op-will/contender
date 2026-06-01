@@ -362,6 +362,8 @@ fn create_spam_cli_args(
             } else {
                 None
             },
+            txs_per_period: None,
+            period_millis: 1000,
             txs_per_block: if matches!(spam_mode, CampaignMode::Tpb) {
                 Some(spam_rate)
             } else {
