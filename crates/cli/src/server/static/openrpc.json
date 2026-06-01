@@ -10,15 +10,15 @@
     "types": {
       "AddSessionParams": {"file":"crates/cli/src/server/rpc_server/types.rs","line":40},
       "AgentClass": {"file":"crates/core/src/agent_controller.rs","line":44},
-      "AgentParams": {"file":"crates/cli/src/server/rpc_server/types.rs","line":249},
-      "AuthParams": {"file":"crates/cli/src/server/rpc_server/types.rs","line":191},
+      "AgentParams": {"file":"crates/cli/src/server/rpc_server/types.rs","line":270},
+      "AuthParams": {"file":"crates/cli/src/server/rpc_server/types.rs","line":212},
       "BlobsCliArgs": {"file":"crates/cli/src/default_scenarios/blobs.rs","line":10},
-      "BuilderParams": {"file":"crates/cli/src/server/rpc_server/types.rs","line":227},
+      "BuilderParams": {"file":"crates/cli/src/server/rpc_server/types.rs","line":248},
       "BuiltinScenarioCli": {"file":"crates/cli/src/default_scenarios/builtin.rs","line":33},
       "BundleCallDefinition": {"file":"crates/core/src/generator/function_def.rs","line":61},
       "BundleTypeCli": {"file":"crates/cli/src/commands/common.rs","line":474},
       "CompiledContract": {"file":"crates/core/src/generator/create_def.rs","line":8},
-      "ContenderSessionInfo": {"file":"crates/cli/src/server/sessions.rs","line":128},
+      "ContenderSessionInfo": {"file":"crates/cli/src/server/sessions.rs","line":136},
       "CreateDefinition": {"file":"crates/core/src/generator/create_def.rs","line":65},
       "CustomContractCliArgs": {"file":"crates/cli/src/default_scenarios/custom_contract.rs","line":17},
       "EngineMessageVersion": {"file":"crates/cli/src/commands/common.rs","line":280},
@@ -28,22 +28,23 @@
       "EthereumPrecompile": {"file":"crates/cli/src/default_scenarios/eth_functions/precompiles.rs","line":11},
       "FillBlockCliArgs": {"file":"crates/cli/src/default_scenarios/fill_block.rs","line":17},
       "FunctionCallDefinition": {"file":"crates/core/src/generator/function_def.rs","line":12},
-      "FundAccountsParams": {"file":"crates/cli/src/server/rpc_server/types.rs","line":273},
+      "FundAccountsParams": {"file":"crates/cli/src/server/rpc_server/types.rs","line":294},
       "FuzzParam": {"file":"crates/core/src/generator/function_def.rs","line":176},
       "RevertCliArgs": {"file":"crates/cli/src/default_scenarios/revert.rs","line":8},
       "ServerStatus": {"file":"crates/cli/src/server/rpc_server/types.rs","line":33},
-      "SessionOptions": {"file":"crates/cli/src/server/rpc_server/types.rs","line":234},
+      "SessionOptions": {"file":"crates/cli/src/server/rpc_server/types.rs","line":255},
       "SessionStatus": {"file":"crates/cli/src/server/sessions.rs","line":23},
       "SetCodeCliArgs": {"file":"crates/cli/src/default_scenarios/setcode/base.rs","line":19},
       "SetCodeExecuteCliArgs": {"file":"crates/cli/src/default_scenarios/setcode/execute.rs","line":14},
       "SetCodeSubCommand": {"file":"crates/cli/src/default_scenarios/setcode/execute.rs","line":59},
-      "SpamParams": {"file":"crates/cli/src/server/rpc_server/types.rs","line":124},
+      "SetMixParams": {"file":"crates/cli/src/server/rpc_server/types.rs","line":157},
+      "SpamParams": {"file":"crates/cli/src/server/rpc_server/types.rs","line":130},
       "SpamRequest": {"file":"crates/core/src/generator/types.rs","line":20},
-      "SpammerType": {"file":"crates/cli/src/server/rpc_server/types.rs","line":144},
+      "SpammerType": {"file":"crates/cli/src/server/rpc_server/types.rs","line":165},
       "StorageStressCliArgs": {"file":"crates/cli/src/default_scenarios/storage.rs","line":7},
       "StressCliArgs": {"file":"crates/cli/src/default_scenarios/stress.rs","line":19},
-      "TestConfig": {"file":"crates/cli/src/server/rpc_server/types.rs","line":83},
-      "TestConfigSource": {"file":"crates/cli/src/server/rpc_server/types.rs","line":83},
+      "TestConfig": {"file":"crates/cli/src/server/rpc_server/types.rs","line":89},
+      "TestConfigSource": {"file":"crates/cli/src/server/rpc_server/types.rs","line":89},
       "TransferStressCliArgs": {"file":"crates/cli/src/default_scenarios/transfers.rs","line":12},
       "TxTypeCli": {"file":"crates/cli/src/commands/common.rs","line":443},
       "UniV2CliArgs": {"file":"crates/cli/src/default_scenarios/uni_v2.rs","line":15}
@@ -139,6 +140,20 @@
       }
     },
     {
+      "name": "setMix",
+      "params": [
+        {
+          "name": "params",
+          "required": true,
+          "schema": {"$ref":"#/components/schemas/SetMixParams"}
+        }
+      ],
+      "result": {
+        "name": "setMix",
+        "schema": {"type":"string"}
+      }
+    },
+    {
       "name": "fundAccounts",
       "params": [
         {
@@ -169,7 +184,7 @@
   ],
   "components": {
     "schemas": {
-      "AddSessionParams": {"description":"RPC parameters for adding a new contender session.","type":"object","properties":{"name":{"type":"string"},"rpcUrl":{"type":"string"},"testConfig":{"$ref":"#/components/schemas/TestConfigSource"},"options":{"$ref":"#/components/schemas/SessionOptions"}},"required":["name","rpcUrl"]},
+      "AddSessionParams": {"description":"RPC parameters for adding a new contender session.","type":"object","properties":{"name":{"type":"string"},"rpcUrl":{"type":"string"},"testConfig":{"$ref":"#/components/schemas/TestConfigSource"},"options":{"$ref":"#/components/schemas/SessionOptions"},"seed":{"description":"Optional seed for deriving the session's pool accounts. When set, the caller controls which addresses each pool resolves to (so they can be allowlisted ahead of time). When unset, the server derives a seed from the session index.","type":"string"}},"required":["name","rpcUrl"]},
       "AgentClass": {"type":"string","enum":["Deployer","SetupSender","Spammer"]},
       "AgentParams": {"type":"object","properties":{"createAccounts":{"type":"integer"},"setupAccounts":{"type":"integer"},"spamAccounts":{"type":"integer"}}},
       "AuthParams": {"type":"object","properties":{"jwtSecret":{"type":"string"},"messageVersion":{"$ref":"#/components/schemas/EngineMessageVersion"},"rpcUrl":{"type":"string"},"callFcu":{"type":"boolean"},"useOp":{"type":"boolean"}},"required":["jwtSecret","messageVersion","rpcUrl"]},
@@ -198,7 +213,8 @@
       "SetCodeCliArgs": {"type":"object","properties":{"command":{"$ref":"#/components/schemas/SetCodeSubCommand"},"contract_address":{"description":"The contract address containing the bytecode to copy into the sender's EOA. May be a placeholder. If not set, a test contract will be deployed.","type":"string"},"signature":{"description":"The solidity signature of the function to call on the EOA after the setCode transaction executes.","type":"string"},"args":{"description":"Comma-separated args to the function called on the EOA's new code.","type":"array","items":{"type":"string"}}}},
       "SetCodeExecuteCliArgs": {"type":"object","properties":{"to":{"description":"The address to call via the smart-wallet's execute function.","type":"string"},"sig":{"description":"The solidity signature of the function to call via the smart-wallet's execute function.","type":"string"},"args":{"description":"Comma-separated arguments to the function being called via the smart-wallet's execute function.","type":"array","items":{"type":"string"}},"value":{"description":"Ether to send with the delegated call. Note: you must manually fund your setCode signer's account to use this feature.","type":"string"}},"required":["to","sig","args"]},
       "SetCodeSubCommand": {"oneOf":[{"description":"Helper function to delegate function calls via `execute(Call[])` on a smart-wallet contract.","type":"object","properties":{"Execute": {"$ref":"#/components/schemas/SetCodeExecuteCliArgs"}},"required":["Execute"]}]},
-      "SpamParams": {"description":"RPC parameters for the `spam` method.","type":"object","properties":{"sessionId":{"type":"integer"},"txsPerPeriod":{"description":"Number of transactions per period. Defaults to 10.","type":"integer"},"duration":{"description":"Number of periods (seconds or blocks). Defaults to 10.","type":"integer"},"spammer":{"description":"Which spammer to use. Defaults to `Timed`.","$ref":"#/components/schemas/SpammerType"},"name":{"description":"Human-readable name for this spam run.","type":"string"},"saveReceipts":{"description":"Whether to look for receipts while spamming; enables onchain metrics collection.","type":"boolean"},"runForever":{"description":"When true, the spammer restarts automatically after each run until stopped.","type":"boolean"},"reportIntervalSecs":{"description":"When passed, the server will log a summary of the current spam run every `reportIntervalSecs` seconds. Note that this may have a performance impact if set to a very low value.","type":"integer"}},"required":["sessionId"]},
+      "SetMixParams": {"description":"RPC parameters for the `setMix` method: adjust the live priority percentage of a running priority-ratio spam session.","type":"object","properties":{"sessionId":{"type":"integer"},"priorityPct":{"description":"Fraction (0..=100) of each batch to send from the priority pool.","type":"integer"}},"required":["sessionId","priorityPct"]},
+      "SpamParams": {"description":"RPC parameters for the `spam` method.","type":"object","properties":{"sessionId":{"type":"integer"},"txsPerPeriod":{"description":"Number of transactions per period. Defaults to 10.","type":"integer"},"duration":{"description":"Number of periods (seconds or blocks). Defaults to 10.","type":"integer"},"spammer":{"description":"Which spammer to use. Defaults to `Timed`.","$ref":"#/components/schemas/SpammerType"},"name":{"description":"Human-readable name for this spam run.","type":"string"},"saveReceipts":{"description":"Whether to look for receipts while spamming; enables onchain metrics collection.","type":"boolean"},"runForever":{"description":"When true, the spammer restarts automatically after each run until stopped.","type":"boolean"},"reportIntervalSecs":{"description":"When passed, the server will log a summary of the current spam run every `reportIntervalSecs` seconds. Note that this may have a performance impact if set to a very low value.","type":"integer"},"priorityPct":{"description":"When set (0..=100), the run is a two-pool priority-ratio run: this fraction of each batch is signed from the `priority` pool, the rest from the `normal` pool. The live value can then be adjusted via `setMix`. When unset, the run uses the standard single-pool path.","type":"integer"}},"required":["sessionId"]},
       "SpamRequest": {"description":"Definition of a spam request template. TestConfig uses this for TOML parsing.","oneOf":[{"type":"object","properties":{"tx": {"$ref":"#/components/schemas/FunctionCallDefinition"}},"required":["tx"]},{"type":"object","properties":{"bundle": {"$ref":"#/components/schemas/BundleCallDefinition"}},"required":["bundle"]}]},
       "SpammerType": {"type":"string","enum":["timed","blockwise"]},
       "StorageStressCliArgs": {"type":"object","properties":{"num_slots":{"type":"integer"},"num_iterations":{"type":"integer"}},"required":["num_slots","num_iterations"]},

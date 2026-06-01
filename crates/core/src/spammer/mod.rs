@@ -1,3 +1,4 @@
+pub mod batch_composer;
 pub mod blockwise;
 pub mod error;
 mod spammer_trait;
@@ -7,6 +8,7 @@ mod tx_callback;
 mod types;
 pub mod util;
 
+pub use batch_composer::{BatchComposer, PriorityRatioComposer, ReplayComposer};
 pub use blockwise::BlockwiseSpammer;
 pub use error::CallbackError;
 pub use spammer_trait::{SpamRunContext, Spammer};

@@ -1562,10 +1562,10 @@ where
     pub async fn execute_spammer<F: SpamCallback + 'static>(
         &mut self,
         cursor: &mut futures::stream::Take<Pin<Box<dyn Stream<Item = SpamTrigger> + Send>>>,
-        tx_req_chunks: &[Vec<ExecutionRequest>],
+        composer: &mut dyn crate::spammer::BatchComposer,
         sent_tx_callback: Arc<F>,
     ) -> Result<()> {
-        let mut tick = 0;
+        let mut tick = 0u64;
 
         // Deferred batch state from the previous iteration. Tasks run in the
         // background during the interval wait, so collecting results at the
@@ -1583,17 +1583,17 @@ where
                 self.collect_pending_batch(batch, &sent_tx_callback).await?;
             }
 
-            // assign from addrs, nonces, and gas prices for this chunk of tx requests
-            let payloads = self
-                .prepare_spam(&tx_req_chunks[tick % tx_req_chunks.len().max(1)])
-                .await?;
+            // Compose this tick's batch (single-pool replay or two-pool blend),
+            // then assign from addrs, nonces, and gas prices.
+            let batch = composer.compose(tick);
+            let payloads = self.prepare_spam(&batch).await?;
             let num_payloads = payloads.len();
 
             // initialize async context handlers
             let (success_sender, success_receiver) = tokio::sync::mpsc::channel(num_payloads);
             let (add_gas_sender, add_gas_receiver) = tokio::sync::mpsc::channel(num_payloads);
             let (shift_nonce_sender, shift_nonce_receiver) =
-                tokio::sync::mpsc::channel(tx_req_chunks[0].len());
+                tokio::sync::mpsc::channel(batch.len().max(1));
             let context = SpamContextHandler {
                 success_send_tx: success_sender,
                 add_gas: add_gas_sender,
@@ -1877,6 +1877,55 @@ where
             .chunks(txs_per_period as usize)
             .map(|chunk| chunk.to_vec())
             .collect::<_>())
+    }
+
+    /// Generates the run's spam txs and splits them into `(priority, normal)`
+    /// streams by **generation step**. The scenario must define exactly two
+    /// `[[spam]]` steps: the first uses the priority pool, the second the normal
+    /// pool. `PlanType::Spam` emits txs grouped by step — all of step 0, then all
+    /// of step 1 — so the flat output is `[priority.., normal..]` and we split at
+    /// the midpoint.
+    ///
+    /// Splitting by step (not by sender address) is deliberate: two pools can
+    /// derive overlapping address sets when their seeds are close, so an
+    /// address-based partition is not sound. Step order is.
+    ///
+    /// Nonces are (re)assigned at send time per address by `prepare_tx_request`,
+    /// so the split need not preserve any cross-pool ordering beyond this.
+    ///
+    /// `per_pool_txs` is how many txs EACH returned stream should hold. Because the
+    /// priority ratio can sit at 100% (a batch drawn entirely from one pool), each
+    /// stream must cover the whole run independently — so we generate
+    /// `per_pool_txs * 2` (the two steps split evenly) and hand back `per_pool_txs`
+    /// per pool. This is the "2x generation" cost: at slider extremes the unused
+    /// half of the opposite stream is discarded.
+    pub async fn get_priority_normal_streams(
+        &self,
+        per_pool_txs: u64,
+    ) -> Result<(Vec<ExecutionRequest>, Vec<ExecutionRequest>)> {
+        let step_count = self.config.get_spam_steps()?.len();
+        if step_count != 2 {
+            return Err(RuntimeErrorKind::InvalidParams(RuntimeParamErrorKind::InvalidArgs(
+                format!(
+                    "priority-ratio spam requires exactly 2 [[spam]] steps (priority, normal), found {step_count}"
+                ),
+            ))
+            .into());
+        }
+
+        // Generate per_pool_txs for each of the two steps. load_txs emits
+        // step-grouped output, so the first half is the priority pool's stream.
+        let (mut tx_requests, _nonces) = self
+            .load_txs(crate::generator::PlanType::Spam(
+                per_pool_txs.saturating_mul(2),
+                |_r| Ok(None),
+            ))
+            .await?;
+
+        let mid = tx_requests.len() / 2;
+        let normal = tx_requests.split_off(mid);
+        let priority = tx_requests;
+        Ok((priority, normal))
     }
 
     /// Wait for pending txs to confirm, then delete any remaining cache items.
@@ -2169,7 +2218,7 @@ struct PendingBatch {
     shift_nonce_receiver: tokio::sync::mpsc::Receiver<(Address, i32)>,
     num_payloads: usize,
     num_tasks: usize,
-    tick: usize,
+    tick: u64,
 }
 
 trait TxKey {
@@ -2390,6 +2439,85 @@ pub mod tests {
 
     impl_noop_templater!(MockConfig);
 
+    /// Two-step spam config (priority pool first, normal pool second) for testing
+    /// the priority-ratio stream split. Both steps call the same counter contract.
+    #[derive(Clone)]
+    pub struct TwoPoolMockConfig;
+
+    impl PlanConfig<String> for TwoPoolMockConfig {
+        fn get_env(&self) -> std::result::Result<HashMap<String, String>, GeneratorError> {
+            Ok(HashMap::new())
+        }
+
+        fn get_create_steps(&self) -> std::result::Result<Vec<CreateDefinition>, GeneratorError> {
+            Ok(vec![CreateDefinition {
+                contract: CompiledContract {
+                    bytecode: COUNTER_BYTECODE.to_string(),
+                    name: "counter".to_string(),
+                },
+                signature: None,
+                args: None,
+                from: None,
+                from_pool: Some("admin".to_owned()),
+            }])
+        }
+
+        fn get_setup_steps(
+            &self,
+        ) -> std::result::Result<Vec<FunctionCallDefinition>, GeneratorError> {
+            Ok(vec![])
+        }
+
+        fn get_spam_steps(&self) -> std::result::Result<Vec<SpamRequest>, GeneratorError> {
+            let step = |pool: &str| {
+                SpamRequest::Tx(
+                    FunctionCallDefinition::new("0x0000000000000000000000000000000000000001")
+                        .with_from_pool(pool)
+                        .with_signature("increment()")
+                        .with_gas_limit(100_000)
+                        .into(),
+                )
+            };
+            Ok(vec![step("priority"), step("normal")])
+        }
+    }
+
+    impl_noop_templater!(TwoPoolMockConfig);
+
+    async fn get_two_pool_scenario(
+        anvil: &AnvilInstance,
+    ) -> Result<TestScenario<MockDb, RandSeed, TwoPoolMockConfig>> {
+        let seed = RandSeed::new();
+        let signers = get_test_signers();
+        let scenario = TestScenario::new(
+            TwoPoolMockConfig,
+            MockDb.into(),
+            seed,
+            TestScenarioParams {
+                rpc_url: anvil.endpoint_url(),
+                builder_rpc_url: None,
+                txs_rpc_url: None,
+                signers,
+                agent_spec: AgentSpec::default(),
+                tx_type: alloy::consensus::TxType::Eip1559,
+                bundle_type: BundleType::default(),
+                pending_tx_timeout: Duration::from_secs(12),
+                extra_msg_handles: None,
+                sync_nonces_after_batch: true,
+                rpc_batch_size: 0,
+                gas_price: None,
+                scenario_label: None,
+                send_raw_tx_sync: false,
+                flashblocks_ws_url: None,
+            },
+            None,
+            (&PROM, &HIST).into(),
+            &CancellationToken::new(),
+        )
+        .await?;
+        Ok(scenario)
+    }
+
     pub async fn get_test_scenario(
         anvil: &AnvilInstance,
         builder_anvil: Option<&AnvilInstance>,
@@ -2524,6 +2652,57 @@ pub mod tests {
             }
             _ => panic!("expected tx"),
         }
+    }
+
+    #[tokio::test]
+    async fn get_priority_normal_streams_splits_by_step(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let anvil = spawn_anvil();
+        let scenario = get_two_pool_scenario(&anvil).await?;
+
+        let priority_addrs: std::collections::HashSet<_> = scenario
+            .agent_store
+            .get_agent("priority")
+            .expect("priority pool exists")
+            .signers
+            .iter()
+            .map(|s| s.address())
+            .collect();
+
+        // per_pool_txs = 24 => generate 48, split 24/24.
+        let (priority, normal) = scenario.get_priority_normal_streams(24).await?;
+        assert_eq!(priority.len(), 24);
+        assert_eq!(normal.len(), 24);
+
+        let from_of = |req: &ExecutionRequest| match req {
+            ExecutionRequest::Tx(t) => t.tx.from.unwrap(),
+            ExecutionRequest::Bundle(reqs) => reqs[0].tx.from.unwrap(),
+        };
+        // Priority half is the first step (priority pool); normal half is the second.
+        for req in &priority {
+            assert!(
+                priority_addrs.contains(&from_of(req)),
+                "priority stream should only contain priority-pool senders"
+            );
+        }
+        for req in &normal {
+            assert!(
+                !priority_addrs.contains(&from_of(req)),
+                "normal stream should not contain priority-pool senders"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_priority_normal_streams_errors_when_not_two_steps(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let anvil = spawn_anvil();
+        // MockConfig has three spam steps, not two.
+        let scenario = get_test_scenario(&anvil, None, None).await?;
+        let res = scenario.get_priority_normal_streams(8).await;
+        assert!(res.is_err(), "non-two-step scenario should error");
+        Ok(())
     }
 
     /// Regression test: when a spam tx specifies `max_priority_fee_per_gas`

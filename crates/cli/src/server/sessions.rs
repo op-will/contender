@@ -14,7 +14,7 @@ use contender_sqlite::SqliteDb;
 use contender_testfile::TestConfig;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use tokio_util::sync::CancellationToken;
 
 type SessionId = usize;
@@ -34,7 +34,7 @@ impl std::fmt::Display for SessionStatus {
             SessionStatus::Ready => write!(f, "Ready"),
             SessionStatus::Spamming(params) => {
                 let run_opts = params.as_run_opts();
-                let spammer_type = params.spammer.clone().unwrap_or_default();
+                let spammer_type = params.spammer.unwrap_or_default();
                 let units = match spammer_type {
                     SpammerType::Timed => ("tps", "seconds"),
                     SpammerType::Blockwise => ("tpb", "blocks"),
@@ -74,6 +74,9 @@ pub struct ContenderSession {
     /// Per-spam-run token. Created fresh each time `spam` is called, cancelled by `stop`
     /// (or `remove`). After cancellation the session returns to `Ready` and can spam again.
     pub spam_cancel: Option<CancellationToken>,
+    /// Live priority percentage (0..=100) for a priority-ratio run. `Some` only while
+    /// such a run is active; `setMix` writes it, the spam loop's composer reads it.
+    pub priority_pct: Option<watch::Sender<u8>>,
 
     // --- Cached funding data (available even while contender is taken) ---
     /// The funder signer, populated after initialization.
@@ -92,6 +95,10 @@ pub struct NewSessionParams {
     pub rpc_url: Url,
     pub test_config: TestConfig,
     pub options: SessionOptions,
+    /// Seed for deriving the session's pool accounts. Chosen by the caller
+    /// (addSession's `seed` param, or an id-derived fallback) so pool addresses
+    /// are predictable and can be allowlisted ahead of a run.
+    pub seed: RandSeed,
 }
 
 impl ContenderSession {
@@ -106,7 +113,7 @@ impl ContenderSession {
         };
 
         let contender = info
-            .create_contender(params.test_config, params.options)
+            .create_contender(params.test_config, params.options, params.seed)
             .await?;
         let (log_channel, _) = broadcast::channel(4096);
         let cancel = contender.cancel_token();
@@ -116,6 +123,7 @@ impl ContenderSession {
             log_channel,
             cancel,
             spam_cancel: None,
+            priority_pct: None,
             funder: None,
             agent_store: None,
             rpc_client: None,
@@ -137,10 +145,10 @@ impl ContenderSessionInfo {
         &self,
         testconfig: TestConfig,
         options: SessionOptions,
+        seeder: RandSeed,
     ) -> Result<Contender<SqliteDb, RandSeed, TestConfig, Uninitialized>, ContenderRpcError> {
         // using in-memory SQLite for now; will switch to file-based if we need persistence across server restarts
         let db = contender_sqlite::SqliteDb::new_memory();
-        let seeder = contender_core::generator::RandSeed::seed_from_bytes(&self.id.to_be_bytes());
 
         // add env to TestConfig before building ContenderCtx
         let mut testconfig = testconfig;

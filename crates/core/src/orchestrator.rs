@@ -835,6 +835,97 @@ where
         result
     }
 
+    /// Like [`Self::spam`], but composes each batch from two pools (priority and
+    /// normal) by a live ratio read from `priority_pct`. The scenario must define
+    /// exactly two `[[spam]]` steps (priority first, normal second); the two
+    /// per-pool streams are pre-generated and blended per tick. Fixed-duration only.
+    pub async fn spam_priority_ratio<F, SP>(
+        &mut self,
+        spammer: SP,
+        callback: Arc<F>,
+        opts: RunOpts,
+        priority_pct: tokio::sync::watch::Receiver<u8>,
+        cancel_token: Option<CancellationToken>,
+    ) -> Result<()>
+    where
+        F: OnTxSent + OnBatchSent + Send + Sync + 'static,
+        SP: Spammer<F, D, S, P>,
+    {
+        let scenario = &mut *self.state.scenario;
+
+        scenario.prepare_for_run().await?;
+
+        let run_req = opts.create_spam_run_request(
+            &scenario.rpc_url,
+            self.ctx.pending_tx_timeout,
+            SP::duration_units(opts.periods),
+        );
+        let run_id = scenario.db.insert_run(&run_req).map_err(|e| e.into())?;
+
+        // Initialize TxActor contexts so flush_loop can match receipts.
+        let current_block = scenario.rpc_client.get_block_number().await?;
+        let actor_ctx = crate::spammer::tx_actor::ActorContext::new(current_block, run_id)
+            .with_pending_tx_timeout(self.ctx.pending_tx_timeout);
+        for handle in scenario.msg_handles.values() {
+            handle.init_ctx(actor_ctx.clone()).await?;
+        }
+
+        let reporting_handle = if let Some(report_interval) = opts.report_interval_secs {
+            spawn_spam_report_task(
+                self.ctx.db.as_ref(),
+                run_id,
+                report_interval,
+                opts.txs_per_period * opts.periods,
+            )
+        } else {
+            CancellationToken::new()
+        };
+
+        // Pre-generate both pool streams, EACH sized for the whole run, so either
+        // can satisfy a batch drawn entirely from it (slider at 0% or 100%). The
+        // composer blends them per tick; unused tail txs are discarded at run end.
+        let per_pool_txs = opts.txs_per_period * opts.periods;
+        let (priority_txs, normal_txs) = scenario.get_priority_normal_streams(per_pool_txs).await?;
+
+        let result = if let Some(external) = cancel_token {
+            tokio::select! {
+                res = spammer.spam_rpc_priority_ratio(
+                    scenario,
+                    opts.txs_per_period,
+                    opts.periods,
+                    priority_txs,
+                    normal_txs,
+                    priority_pct,
+                    Some(run_id),
+                    callback,
+                ) => res,
+                _ = external.cancelled() => Ok(()),
+            }
+        } else {
+            spammer
+                .spam_rpc_priority_ratio(
+                    scenario,
+                    opts.txs_per_period,
+                    opts.periods,
+                    priority_txs,
+                    normal_txs,
+                    priority_pct,
+                    Some(run_id),
+                    callback,
+                )
+                .await
+        };
+
+        scenario.ctx.cancel_token.cancel();
+        reporting_handle.cancel();
+        for handle in scenario.msg_handles.values() {
+            handle.await_flush().await;
+        }
+        scenario.prepare_for_run().await?;
+
+        result
+    }
+
     pub async fn fund_accounts(&self, agent_class: AgentClass, amount: U256) -> Result<()> {
         let scenario = &*self.state.scenario;
 

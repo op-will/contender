@@ -12,7 +12,7 @@ use alloy::{
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 pub trait SignerRegistry<Index: Ord> {
     fn get_signer(&self, idx: Index) -> Option<&PrivateKeySigner>;
@@ -254,9 +254,39 @@ impl SignerStore {
             info!("Funding {to_addr} with {} ether", format_ether(amount));
         }
 
+        // Wait for each funding tx by polling for its receipt. We poll rather than
+        // use PendingTransactionBuilder::watch() because watch()'s filter-based
+        // notification can silently miss confirmations on some RPCs (observed on
+        // OP devnets), hanging funding — and therefore session init — forever.
+        let poll_interval = std::time::Duration::from_millis(500);
+        let per_tx_timeout = std::time::Duration::from_secs(60);
         for tx in sent_txs {
-            let tx_hash = tx.with_required_confirmations(1).watch().await?;
-            debug!("funding tx landed: {tx_hash}");
+            let tx_hash = *tx.tx_hash();
+            let deadline = std::time::Instant::now() + per_tx_timeout;
+            loop {
+                match provider.get_transaction_receipt(tx_hash).await {
+                    Ok(Some(_)) => {
+                        debug!("funding tx landed: {tx_hash}");
+                        break;
+                    }
+                    Ok(None) => {
+                        if std::time::Instant::now() >= deadline {
+                            return Err(crate::error::RuntimeErrorKind::InvalidParams(
+                                crate::error::RuntimeParamErrorKind::InvalidArgs(format!(
+                                    "funding tx {tx_hash} not confirmed within {}s",
+                                    per_tx_timeout.as_secs()
+                                )),
+                            )
+                            .into());
+                        }
+                        tokio::time::sleep(poll_interval).await;
+                    }
+                    Err(e) => {
+                        warn!("error polling funding receipt for {tx_hash}: {e}; retrying");
+                        tokio::time::sleep(poll_interval).await;
+                    }
+                }
+            }
         }
 
         Ok(())

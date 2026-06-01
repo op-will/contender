@@ -42,6 +42,11 @@ pub struct AddSessionParams {
     pub rpc_url: Url,
     pub test_config: Option<TestConfigSource>,
     pub options: Option<SessionOptions>,
+    /// Optional seed for deriving the session's pool accounts. When set, the
+    /// caller controls which addresses each pool resolves to (so they can be
+    /// allowlisted ahead of time). When unset, the server derives a seed from
+    /// the session index.
+    pub seed: Option<String>,
 }
 
 impl AddSessionParams {
@@ -59,7 +64,7 @@ impl AddSessionParams {
                 .to_testconfig(
                     Some(BuiltinOptions {
                         accounts_per_agent: None,
-                        seed,
+                        seed: seed.clone(),
                         spam_rate: None,
                     }),
                     &provider,
@@ -75,6 +80,7 @@ impl AddSessionParams {
             rpc_url: self.rpc_url.clone(),
             test_config,
             options: self.options.unwrap_or_default(),
+            seed,
         })
     }
 }
@@ -137,9 +143,24 @@ pub struct SpamParams {
     pub run_forever: Option<bool>,
     /// When passed, the server will log a summary of the current spam run every `reportIntervalSecs` seconds. Note that this may have a performance impact if set to a very low value.
     pub report_interval_secs: Option<u64>,
+    /// When set (0..=100), the run is a two-pool priority-ratio run: this fraction of
+    /// each batch is signed from the `priority` pool, the rest from the `normal` pool.
+    /// The live value can then be adjusted via `setMix`. When unset, the run uses the
+    /// standard single-pool path.
+    pub priority_pct: Option<u8>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, Default, PartialEq, Eq)]
+/// RPC parameters for the `setMix` method: adjust the live priority percentage of a
+/// running priority-ratio spam session.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SetMixParams {
+    pub session_id: usize,
+    /// Fraction (0..=100) of each batch to send from the priority pool.
+    pub priority_pct: u8,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum SpammerType {
     /// Send a batch of txs at a fixed time interval (1 second).
@@ -377,5 +398,43 @@ mod tests {
         }))
         .unwrap_err();
         assert!(err.to_string().contains("failed to parse value"));
+    }
+
+    #[test]
+    fn add_session_params_seed_is_optional() {
+        let without: AddSessionParams = serde_json::from_value(serde_json::json!({
+            "name": "s", "rpcUrl": "http://localhost:8545"
+        }))
+        .unwrap();
+        assert_eq!(without.seed, None);
+
+        let with: AddSessionParams = serde_json::from_value(serde_json::json!({
+            "name": "s", "rpcUrl": "http://localhost:8545", "seed": "0xabc"
+        }))
+        .unwrap();
+        assert_eq!(with.seed.as_deref(), Some("0xabc"));
+    }
+
+    #[test]
+    fn set_mix_params_deserializes_camel_case() {
+        let params: SetMixParams = serde_json::from_value(serde_json::json!({
+            "sessionId": 3,
+            "priorityPct": 65
+        }))
+        .expect("setMix params should parse");
+        assert_eq!(params.session_id, 3);
+        assert_eq!(params.priority_pct, 65);
+    }
+
+    #[test]
+    fn spam_params_priority_pct_is_optional_and_camel_case() {
+        let without: SpamParams =
+            serde_json::from_value(serde_json::json!({ "sessionId": 1 })).unwrap();
+        assert_eq!(without.priority_pct, None);
+
+        let with: SpamParams =
+            serde_json::from_value(serde_json::json!({ "sessionId": 1, "priorityPct": 0 }))
+                .unwrap();
+        assert_eq!(with.priority_pct, Some(0));
     }
 }

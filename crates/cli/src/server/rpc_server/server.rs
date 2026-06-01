@@ -11,7 +11,9 @@ use tracing::{debug, info, warn, Instrument};
 
 use crate::server::{
     error::ContenderRpcError,
-    rpc_server::{AddSessionParams, FundAccountsParams, ServerStatus, SpamParams, SpammerType},
+    rpc_server::{
+        AddSessionParams, FundAccountsParams, ServerStatus, SetMixParams, SpamParams, SpammerType,
+    },
     sessions::{ContenderSession, ContenderSessionCache, ContenderSessionInfo, SessionStatus},
 };
 
@@ -45,6 +47,9 @@ pub trait ContenderRpc {
 
     #[method(name = "stop")]
     async fn stop(&self, session_id: usize) -> jsonrpsee::core::RpcResult<String>;
+
+    #[method(name = "setMix")]
+    async fn set_mix(&self, params: SetMixParams) -> jsonrpsee::core::RpcResult<String>;
 
     #[method(name = "fundAccounts")]
     async fn fund_accounts(&self, params: FundAccountsParams)
@@ -82,7 +87,12 @@ impl ContenderRpcServer for ContenderServer {
         let session_seed;
         let info = {
             let mut sessions = self.sessions.write().await;
-            session_seed = RandSeed::seed_from_bytes(&sessions.num_sessions().to_be_bytes());
+            // Honor a caller-provided seed (so pool addresses are predictable and
+            // can be pre-allowlisted); otherwise derive one from the session index.
+            session_seed = match &params.seed {
+                Some(seed) => RandSeed::seed_from_str(seed),
+                None => RandSeed::seed_from_bytes(&sessions.num_sessions().to_be_bytes()),
+            };
             let session = sessions
                 .add_session(params.to_new_session_params(session_seed).await?)
                 .await?;
@@ -233,6 +243,33 @@ impl ContenderRpcServer for ContenderServer {
         let spammer_type = params.spammer.unwrap_or_default();
         let run_forever = params.run_forever.unwrap_or(false);
 
+        // Priority-ratio mode: when priorityPct is set, the run blends two pools
+        // (`priority`/`normal`) by a live ratio adjustable via setMix. It requires a
+        // fixed duration (pre-generated streams) and rejects run_forever.
+        let priority_rx = if let Some(pct) = params.priority_pct {
+            if pct > 100 {
+                return Err(ContenderRpcError::InvalidArguments(
+                    "priorityPct must be 0..=100".into(),
+                )
+                .into());
+            }
+            if run_forever {
+                return Err(ContenderRpcError::InvalidArguments(
+                    "priority-ratio runs require a fixed duration; --forever is not supported"
+                        .into(),
+                )
+                .into());
+            }
+            let (tx, rx) = tokio::sync::watch::channel(pct);
+            let mut lock = self.sessions.write().await;
+            if let Some(session) = lock.get_session_mut(session_id) {
+                session.priority_pct = Some(tx);
+            }
+            Some(rx)
+        } else {
+            None
+        };
+
         // Set up background funding for run_forever mode.
         // The spam loop sends () on `fund_tx` after each batch; the funding
         // task receives it and tops up any spammer account whose balance has
@@ -287,14 +324,28 @@ impl ContenderRpcServer for ContenderServer {
                     let inner = AssertUnwindSafe(async {
                         let mut contender = contender;
                         let fund_tx = fund_tx;
+                        let priority_rx = priority_rx;
 
                         macro_rules! run_spam {
                             ($callback:expr) => {{
                                 let callback = Arc::new($callback);
 
                                 loop {
-                                    let res = match spammer_type {
-                                        SpammerType::Timed => {
+                                    let res = match (priority_rx.clone(), spammer_type) {
+                                        // Priority-ratio run (always Timed; fixed duration).
+                                        (Some(rx), _) => {
+                                            let spammer = TimedSpammer::new(Duration::from_secs(1));
+                                            contender
+                                                .spam_priority_ratio(
+                                                    spammer,
+                                                    Arc::clone(&callback),
+                                                    opts.clone(),
+                                                    rx,
+                                                    Some(spam_cancel.clone()),
+                                                )
+                                                .await
+                                        }
+                                        (None, SpammerType::Timed) => {
                                             let spammer = TimedSpammer::new(Duration::from_secs(1));
                                             contender
                                                 .spam(
@@ -305,7 +356,7 @@ impl ContenderRpcServer for ContenderServer {
                                                 )
                                                 .await
                                         }
-                                        SpammerType::Blockwise => {
+                                        (None, SpammerType::Blockwise) => {
                                             let spammer = BlockwiseSpammer::new();
                                             contender
                                                 .spam(
@@ -354,6 +405,8 @@ impl ContenderRpcServer for ContenderServer {
                         lock.put_initialized(session_id, contender);
                         if let Some(session) = lock.get_session_mut(session_id) {
                             session.spam_cancel = None;
+                            // Run finished: setMix no longer applies to this session.
+                            session.priority_pct = None;
                         }
                         match result {
                             Ok(()) => {
@@ -384,6 +437,7 @@ impl ContenderRpcServer for ContenderServer {
                         let mut lock = sessions_panic.write().await;
                         if let Some(session) = lock.get_session_mut(session_id) {
                             session.spam_cancel = None;
+                            session.priority_pct = None;
                             session.info.status =
                                 SessionStatus::Failed(format!("spam panicked: {msg}"));
                         }
@@ -416,6 +470,30 @@ impl ContenderRpcServer for ContenderServer {
         Ok(format!("Stopping session {session_id}"))
     }
 
+    async fn set_mix(&self, params: SetMixParams) -> jsonrpsee::core::RpcResult<String> {
+        if params.priority_pct > 100 {
+            return Err(
+                ContenderRpcError::InvalidArguments("priorityPct must be 0..=100".into()).into(),
+            );
+        }
+        let sessions = self.sessions.read().await;
+        let Some(session) = sessions.get_session(params.session_id) else {
+            return Err(ContenderRpcError::SessionNotFound(params.session_id).into());
+        };
+        let Some(tx) = session.priority_pct.as_ref() else {
+            return Err(ContenderRpcError::InvalidArguments(
+                "session is not running a priority-ratio spam".into(),
+            )
+            .into());
+        };
+        tx.send_replace(params.priority_pct);
+        info!(
+            "session {} priority_pct set to {}",
+            params.session_id, params.priority_pct
+        );
+        Ok(format!("priority_pct set to {}", params.priority_pct))
+    }
+
     async fn fund_accounts(
         &self,
         params: FundAccountsParams,
@@ -424,7 +502,7 @@ impl ContenderRpcServer for ContenderServer {
 
         // Grab cached funding data under a brief read lock — available even
         // while the contender is taken out for spamming.
-        let (funder, agent, rpc_client) =
+        let (funder, agents, rpc_client) =
             {
                 let sessions = self.sessions.read().await;
                 let Some(session) = sessions.get_session(session_id) else {
@@ -457,9 +535,16 @@ impl ContenderRpcServer for ContenderServer {
                     ContenderRpcError::SessionNotInitialized(session.info.clone())
                 })?;
 
+                // Fund EVERY pool of the requested class, not just the first.
+                // A priority-ratio run has two Spammer-class pools (priority + normal);
+                // get_class would only return one of them.
                 let agent_class = params.agent_class.unwrap_or_default();
-                let agent = agent_store.get_class(&agent_class).cloned();
-                (funder, agent, rpc_client)
+                let agents: Vec<_> = agent_store
+                    .all_agents()
+                    .filter(|(_, s)| s.agent_class == agent_class)
+                    .map(|(_, s)| s.clone())
+                    .collect();
+                (funder, agents, rpc_client)
             };
 
         let span = tracing::info_span!("session_fund_accounts", id = session_id);
@@ -468,13 +553,22 @@ impl ContenderRpcServer for ContenderServer {
             contender_core::CURRENT_SESSION_ID.scope(
                 session_id,
                 async move {
-                    let result = if let Some(agent) = agent {
-                        agent
-                            .fund_signers(&funder, params.amount, rpc_client.as_ref().clone())
-                            .await
-                    } else {
+                    let result = if agents.is_empty() {
                         tracing::warn!("No agents found for requested class, skipping funding");
                         Ok(())
+                    } else {
+                        // Fund pools sequentially: all calls send from the same funder
+                        // EOA, so concurrent funding would race the funder's nonce.
+                        let mut res = Ok(());
+                        for agent in &agents {
+                            res = agent
+                                .fund_signers(&funder, params.amount, rpc_client.as_ref().clone())
+                                .await;
+                            if res.is_err() {
+                                break;
+                            }
+                        }
+                        res
                     };
 
                     match result {
@@ -550,12 +644,22 @@ async fn run_funding_loop(
             _ = cancel.cancelled() => break,
         }
 
-        let Some(spammers) = agent_store.get_class(&AgentClass::Spammer) else {
+        // Check/fund ALL Spammer-class pools, not just the first. A priority-ratio
+        // run has two (priority + normal); get_class would only return one.
+        let spammer_pools: Vec<_> = agent_store
+            .all_agents()
+            .filter(|(_, s)| s.agent_class == AgentClass::Spammer)
+            .map(|(_, s)| s.clone())
+            .collect();
+        if spammer_pools.is_empty() {
             debug!("no spammer agents found, skipping balance check");
             continue;
-        };
+        }
 
-        let addresses = spammers.all_addresses();
+        let addresses: Vec<_> = spammer_pools
+            .iter()
+            .flat_map(|s| s.all_addresses())
+            .collect();
         let mut needs_funding = false;
 
         for addr in &addresses {
@@ -577,13 +681,20 @@ async fn run_funding_loop(
 
         if needs_funding {
             info!("funding spammer accounts (min_balance={})", min_balance);
-            if let Err(e) = spammers
-                .fund_signers(&funder, min_balance, rpc_client.as_ref().clone())
-                .await
-            {
-                warn!("background funding failed: {}", e);
-            } else {
-                info!("background funding completed successfully");
+            // Sequential: all calls send from the same funder EOA.
+            let mut all_ok = true;
+            for pool in &spammer_pools {
+                if let Err(e) = pool
+                    .fund_signers(&funder, min_balance, rpc_client.as_ref().clone())
+                    .await
+                {
+                    warn!("background funding failed: {}", e);
+                    all_ok = false;
+                    break;
+                }
+            }
+            if all_ok {
+                info!("background funding completed");
             }
         }
     }

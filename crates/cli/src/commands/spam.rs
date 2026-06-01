@@ -1197,6 +1197,8 @@ mod tests {
                     spam_args: SendSpamCliArgs {
                         builder_url: None,
                         txs_per_second: Some(50),
+                        txs_per_period: None,
+                        period_millis: 1000,
                         txs_per_block: None,
                         duration: 4,
                         pending_timeout: 10,
@@ -1351,6 +1353,8 @@ mod tests {
             spam_args: SendSpamCliArgs {
                 builder_url: None,
                 txs_per_second: Some(10),
+                txs_per_period: None,
+                period_millis: 1000,
                 txs_per_block: None,
                 duration: 2,
                 pending_timeout: 10,

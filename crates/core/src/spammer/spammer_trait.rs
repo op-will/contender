@@ -65,6 +65,66 @@ where
         sent_tx_callback: Arc<F>,
     ) -> impl std::future::Future<Output = crate::Result<()>> {
         async move {
+            let tx_req_chunks = scenario
+                .get_spam_tx_chunks(txs_per_period, num_periods)
+                .await?;
+            let mut composer = crate::spammer::ReplayComposer::new(tx_req_chunks);
+            self.run_with_composer(
+                scenario,
+                &mut composer,
+                num_periods,
+                run_id,
+                sent_tx_callback,
+            )
+            .await
+        }
+    }
+
+    /// Like [`Self::spam_rpc`], but blends two pre-generated pool streams by a
+    /// live `priority_pct` (0..=100) on each tick. Used by the control server's
+    /// priority-ratio runs. `batch_size` is the per-tick tx count (`txs_per_period`).
+    #[allow(clippy::too_many_arguments)]
+    fn spam_rpc_priority_ratio(
+        &self,
+        scenario: &mut TestScenario<D, S, P>,
+        batch_size: u64,
+        num_periods: u64,
+        priority_txs: Vec<crate::generator::named_txs::ExecutionRequest>,
+        normal_txs: Vec<crate::generator::named_txs::ExecutionRequest>,
+        priority_pct: tokio::sync::watch::Receiver<u8>,
+        run_id: Option<u64>,
+        sent_tx_callback: Arc<F>,
+    ) -> impl std::future::Future<Output = crate::Result<()>> {
+        async move {
+            let mut composer = crate::spammer::PriorityRatioComposer::new(
+                priority_txs,
+                normal_txs,
+                batch_size as usize,
+                priority_pct,
+            );
+            self.run_with_composer(
+                scenario,
+                &mut composer,
+                num_periods,
+                run_id,
+                sent_tx_callback,
+            )
+            .await
+        }
+    }
+
+    /// Shared run body: spawns the FCU background task, drives `execute_spammer`
+    /// with the given composer for `num_periods` ticks, then finalizes (latency
+    /// metrics, nonce sync). Both `spam_rpc` and `spam_rpc_priority_ratio` use it.
+    fn run_with_composer(
+        &self,
+        scenario: &mut TestScenario<D, S, P>,
+        composer: &mut dyn super::BatchComposer,
+        num_periods: u64,
+        run_id: Option<u64>,
+        sent_tx_callback: Arc<F>,
+    ) -> impl std::future::Future<Output = crate::Result<()>> {
+        async move {
             let run_id = run_id.unwrap_or(scenario.db.num_runs().map_err(|e| e.into())?);
             let is_fcu_done = self.context().done_fcu.clone();
             let is_sending_done = self.context().done_sending.clone();
@@ -99,13 +159,10 @@ where
                     Ok(())
                 });
 
-            let tx_req_chunks = scenario
-                .get_spam_tx_chunks(txs_per_period, num_periods)
-                .await?;
             let mut cursor = self.on_spam(scenario).await?.take(num_periods as usize);
 
             scenario
-                .execute_spammer(&mut cursor, &tx_req_chunks, sent_tx_callback)
+                .execute_spammer(&mut cursor, composer, sent_tx_callback)
                 .await?;
             self.context()
                 .done_sending
