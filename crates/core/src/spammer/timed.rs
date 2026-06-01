@@ -73,3 +73,93 @@ where
         &self.context
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy::{network::AnyNetwork, providers::ProviderBuilder};
+    use contender_bundle_provider::bundle::BundleType;
+    use std::sync::Arc;
+    use std::time::Instant;
+    use tokio::sync::OnceCell;
+    use tokio_util::sync::CancellationToken;
+
+    use crate::{
+        db::MockDb,
+        generator::{agent_pools::AgentSpec, util::test::spawn_anvil, RandSeed},
+        test_scenario::{tests::MockConfig, TestScenario, TestScenarioParams},
+    };
+
+    static PROM: OnceCell<prometheus::Registry> = OnceCell::const_new();
+    static HIST: OnceCell<prometheus::HistogramVec> = OnceCell::const_new();
+
+    async fn mock_scenario() -> TestScenario<MockDb, RandSeed, MockConfig> {
+        let anvil = spawn_anvil();
+        let _provider = Arc::new(
+            ProviderBuilder::new()
+                .network::<AnyNetwork>()
+                .connect_http(anvil.endpoint_url()),
+        );
+        let seed = RandSeed::seed_from_str("777777777777");
+        TestScenario::new(
+            MockConfig,
+            MockDb.into(),
+            seed,
+            TestScenarioParams {
+                rpc_url: anvil.endpoint_url(),
+                builder_rpc_url: None,
+                txs_rpc_url: None,
+                signers: crate::util::default_signers(),
+                agent_spec: AgentSpec::default(),
+                tx_type: alloy::consensus::TxType::Legacy,
+                bundle_type: BundleType::default(),
+                pending_tx_timeout: Duration::from_secs(12),
+                extra_msg_handles: None,
+                sync_nonces_after_batch: true,
+                rpc_batch_size: 0,
+                gas_price: None,
+                scenario_label: None,
+                send_raw_tx_sync: false,
+                flashblocks_ws_url: None,
+            },
+            None,
+            (&PROM, &HIST).into(),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+    }
+
+    // The timed spammer's trigger stream must fire at its configured interval,
+    // not assume a fixed one-second period. A 100ms interval should emit ~10
+    // ticks in the time a 1000ms interval emits one, proving sub-second pacing.
+    #[tokio::test]
+    async fn ticks_fire_at_configured_sub_second_interval() {
+        let mut scenario = mock_scenario().await;
+
+        let spammer = TimedSpammer::new(Duration::from_millis(100));
+        let stream = Spammer::<crate::spammer::NilCallback, MockDb, RandSeed, MockConfig>::on_spam(
+            &spammer,
+            &mut scenario,
+        )
+        .await
+        .unwrap();
+
+        let start = Instant::now();
+        let ticks: Vec<_> = stream.take(5).collect().await;
+        let elapsed = start.elapsed();
+
+        assert_eq!(ticks.len(), 5);
+        // 5 ticks at 100ms each: first tick after the initial wait, so ~5
+        // intervals. Allow generous slack for scheduling, but it must be far
+        // under the ~5s a one-second period would take.
+        assert!(
+            elapsed >= Duration::from_millis(450),
+            "expected >=450ms for 5x100ms ticks, got {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(2000),
+            "5x100ms ticks took {elapsed:?}; pacing is not sub-second"
+        );
+    }
+}

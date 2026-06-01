@@ -335,6 +335,37 @@ pub struct SendSpamCliArgs {
     )]
     pub txs_per_second: Option<u64>,
 
+    /// The number of txs to send per period (a tick of `--period-millis`) using
+    /// the timed spammer. Like `--txs-per-second`, but the period length is
+    /// configurable. May not be set if `txs_per_block` or `txs_per_second` is set.
+    #[arg(
+        global = true,
+        long,
+        long_help =
+"Number of txs to send per period, where one period is --period-millis long (default 1000ms).
+This is the count sent on each tick, sent as-is with no per-second division, so the rate
+is exactly --txs-per-period txs every --period-millis. Use it to pace load at sub-second
+granularity (e.g. --tpp 4 --period-millis 100 sends 4 txs every 100ms). Must not be set if
+--txs-per-second or --txs-per-block is set. With --period-millis 1000 it is identical to --tps.",
+        visible_aliases = ["tpp"],
+        help_heading = HELP_HEADING_COMMON,
+    )]
+    pub txs_per_period: Option<u64>,
+
+    /// Length of one timed-spammer period in milliseconds. Only meaningful with
+    /// `--txs-per-period`. Defaults to 1000 (one batch per second).
+    #[arg(
+        global = true,
+        long,
+        default_value_t = 1000,
+        long_help =
+"Length of one timed-spammer period in milliseconds. Each period, --txs-per-period txs are sent.
+Only meaningful with --txs-per-period; ignored otherwise. Defaults to 1000ms, which makes
+--txs-per-period behave exactly like --txs-per-second.",
+        help_heading = HELP_HEADING_COMMON,
+    )]
+    pub period_millis: u64,
+
     /// The number of txs to send per block using the blockwise spammer.
     /// May not be set if `txs_per_second` is set. Requires `prv_keys` to be set.
     #[arg(
@@ -393,11 +424,16 @@ Requires --priv-key to be set for each 'from' address in the given testfile.",
 
 impl SendSpamCliArgs {
     pub fn spam_rate(&self) -> Result<SpamRate, ArgsError> {
-        match (self.txs_per_second, self.txs_per_block) {
-            (Some(_), Some(_)) => Err(ArgsError::SpamRateNotFound),
-            (None, None) => Err(ArgsError::SpamRateNotFound),
-            (Some(tps), None) => Ok(SpamRate::TxsPerSecond(tps)),
-            (None, Some(tpb)) => Ok(SpamRate::TxsPerBlock(tpb)),
+        // --tpp is a timed rate like --tps but with a configurable period. For
+        // rate purposes (builtin scenarios, campaigns) it is the per-period count,
+        // mapped to TxsPerSecond; the period length is applied separately where
+        // the timed spammer is constructed.
+        match (self.txs_per_second, self.txs_per_period, self.txs_per_block) {
+            (None, None, None) => Err(ArgsError::SpamRateNotFound),
+            (Some(tps), None, None) => Ok(SpamRate::TxsPerSecond(tps)),
+            (None, Some(tpp), None) => Ok(SpamRate::TxsPerSecond(tpp)),
+            (None, None, Some(tpb)) => Ok(SpamRate::TxsPerBlock(tpb)),
+            _ => Err(ArgsError::SpamRateNotFound),
         }
     }
 }

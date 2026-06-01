@@ -334,6 +334,8 @@ impl SpamCommandArgs {
         let SendSpamCliArgs {
             builder_url,
             txs_per_second,
+            txs_per_period,
+            period_millis,
             txs_per_block,
             duration,
             pending_timeout,
@@ -352,7 +354,10 @@ impl SpamCommandArgs {
 
         let mut testconfig = self.testconfig().await?;
         let spam_len = testconfig.spam.as_ref().map(|s| s.len()).unwrap_or(0);
-        let txs_per_duration = txs_per_block.unwrap_or(txs_per_second.unwrap_or(spam_len as u64));
+        let txs_per_duration = txs_per_block
+            .or(txs_per_second)
+            .or(txs_per_period)
+            .unwrap_or(spam_len as u64);
         let engine_params = self.engine_params().await?;
 
         // If send_raw_tx_sync is set alongside rpc_batch_size, warn and disable batching.
@@ -383,8 +388,17 @@ impl SpamCommandArgs {
             }
         }
 
+        // Number of spammer ticks over the run: for the sub-second timed path
+        // (--tpp + --period-millis) this exceeds `duration` seconds; otherwise
+        // it equals `duration` (seconds for --tps, blocks for --tpb).
+        let num_periods = if txs_per_period.is_some() {
+            duration.saturating_mul(1000) / period_millis.max(1)
+        } else {
+            duration
+        };
+
         // check if txs_per_duration is enough to cover the spam requests
-        if (txs_per_duration * duration) < spam_len as u64 {
+        if (txs_per_duration * num_periods) < spam_len as u64 {
             return Err(ArgsError::TransactionsPerDurationInsufficient {
                 min_tpd: spam_len as u64,
                 tpd: txs_per_duration,
@@ -481,14 +495,28 @@ impl SpamCommandArgs {
         let block_time = get_block_time(&rpc_client).await?;
 
         check_private_keys(&testconfig, &user_signers);
-        if txs_per_block.is_some() && txs_per_second.is_some() {
-            panic!("Cannot set both --txs-per-block and --txs-per-second");
-        }
-        if txs_per_block.is_none() && txs_per_second.is_none() {
+        let rate_flags_set = [
+            txs_per_block.is_some(),
+            txs_per_second.is_some(),
+            txs_per_period.is_some(),
+        ]
+        .iter()
+        .filter(|set| **set)
+        .count();
+        if rate_flags_set > 1 {
             panic!(
-                "Must set either {} or {}",
+                "Set only one of {}, {}, or {}",
                 bold("--txs-per-block (--tpb)"),
-                bold("--txs-per-second (--tps)")
+                bold("--txs-per-second (--tps)"),
+                bold("--txs-per-period (--tpp)")
+            );
+        }
+        if rate_flags_set == 0 {
+            panic!(
+                "Must set one of {}, {}, or {}",
+                bold("--txs-per-block (--tpb)"),
+                bold("--txs-per-second (--tps)"),
+                bold("--txs-per-period (--tpp)")
             );
         }
 
@@ -605,9 +633,11 @@ impl SpamCommandArgs {
         done_fcu.store(true, std::sync::atomic::Ordering::SeqCst);
 
         // estimate spam cost. contracts must be deployed at this point,
-        // otherwise you'll get "contract not found" errors
+        // otherwise you'll get "contract not found" errors. Cost scales with the
+        // number of batches sent (num_periods), which for sub-second periods
+        // exceeds the wall-clock duration in seconds.
         let total_cost =
-            U256::from(duration) * test_scenario.get_max_spam_cost(&user_signers).await?;
+            U256::from(num_periods) * test_scenario.get_max_spam_cost(&user_signers).await?;
         if min_balance < U256::from(total_cost) {
             return Err(ArgsError::MinBalanceInsufficient {
                 min_balance,
@@ -616,10 +646,10 @@ impl SpamCommandArgs {
             .into());
         }
 
-        let duration_unit = if txs_per_second.is_some() {
-            "second"
-        } else {
+        let duration_unit = if txs_per_block.is_some() {
             "block"
+        } else {
+            "second"
         };
         let duration_units = if duration > 1 {
             format!("{duration_unit}s")
@@ -757,6 +787,8 @@ where
     } = spam_args.to_owned();
     let SendSpamCliArgs {
         txs_per_second,
+        txs_per_period,
+        period_millis,
         txs_per_block,
         duration,
         pending_timeout,
@@ -813,11 +845,17 @@ where
         _ => err,
     };
 
-    let (spammer, txs_per_batch, spam_duration) = if let Some(txs_per_block) = txs_per_block {
+    // `num_periods` is the number of spammer ticks (what spam_rpc consumes);
+    // `spam_duration` is the run-record label, kept in the spammer's natural unit
+    // (blocks or wall-clock seconds) regardless of sub-second period length.
+    let (spammer, txs_per_batch, num_periods, spam_duration) = if let Some(txs_per_block) =
+        txs_per_block
+    {
         info!("Blockwise spammer starting. Sending {txs_per_block} txs per block.");
         (
             TypedSpammer::Blockwise(BlockwiseSpammer::new()),
             txs_per_block,
+            duration,
             SpamDuration::Blocks(duration),
         )
     } else if let Some(txs_per_second) = txs_per_second {
@@ -825,6 +863,23 @@ where
         (
             TypedSpammer::Timed(TimedSpammer::new(std::time::Duration::from_secs(1))),
             txs_per_second,
+            duration,
+            SpamDuration::Seconds(duration),
+        )
+    } else if let Some(txs_per_period) = txs_per_period {
+        // floor(duration_secs * 1000 / period_millis): if the period doesn't
+        // divide the wall-clock duration evenly, run slightly under rather
+        // than over. The run record still reports the requested seconds.
+        let num_periods = duration.saturating_mul(1000) / period_millis.max(1);
+        info!(
+                "Timed spammer starting. Sending {txs_per_period} txs every {period_millis}ms ({num_periods} periods over ~{duration}s)."
+            );
+        (
+            TypedSpammer::Timed(TimedSpammer::new(std::time::Duration::from_millis(
+                period_millis,
+            ))),
+            txs_per_period,
+            num_periods,
             SpamDuration::Seconds(duration),
         )
     } else {
@@ -847,7 +902,7 @@ where
             .as_millis();
         let run = SpamRunRequest {
             timestamp: timestamp as usize,
-            tx_count: (txs_per_batch * duration) as usize,
+            tx_count: (txs_per_batch * num_periods) as usize,
             scenario_name,
             campaign_id: campaign_id.clone(),
             campaign_name: campaign_name.clone(),
@@ -880,7 +935,7 @@ where
     // Spawn periodic reporting task if --report-interval is set and we have a run_id
     let report_interval = args.spam_args.report_interval;
     let report_cancel = if let (Some(interval_secs), Some(rid)) = (report_interval, run_id) {
-        let planned_tx_count = txs_per_batch * duration;
+        let planned_tx_count = txs_per_batch * num_periods;
         Some(spawn_spam_report_task(
             db,
             rid,
@@ -935,7 +990,7 @@ where
                 .spam_rpc(
                     test_scenario,
                     txs_per_batch,
-                    duration,
+                    num_periods,
                     run_id,
                     callback.clone(),
                 )

@@ -16,7 +16,7 @@
       "BuilderParams": {"file":"crates/cli/src/server/rpc_server/types.rs","line":227},
       "BuiltinScenarioCli": {"file":"crates/cli/src/default_scenarios/builtin.rs","line":33},
       "BundleCallDefinition": {"file":"crates/core/src/generator/function_def.rs","line":61},
-      "BundleTypeCli": {"file":"crates/cli/src/commands/common.rs","line":438},
+      "BundleTypeCli": {"file":"crates/cli/src/commands/common.rs","line":474},
       "CompiledContract": {"file":"crates/core/src/generator/create_def.rs","line":8},
       "ContenderSessionInfo": {"file":"crates/cli/src/server/sessions.rs","line":128},
       "CreateDefinition": {"file":"crates/core/src/generator/create_def.rs","line":65},
@@ -45,7 +45,7 @@
       "TestConfig": {"file":"crates/cli/src/server/rpc_server/types.rs","line":83},
       "TestConfigSource": {"file":"crates/cli/src/server/rpc_server/types.rs","line":83},
       "TransferStressCliArgs": {"file":"crates/cli/src/default_scenarios/transfers.rs","line":12},
-      "TxTypeCli": {"file":"crates/cli/src/commands/common.rs","line":407},
+      "TxTypeCli": {"file":"crates/cli/src/commands/common.rs","line":443},
       "UniV2CliArgs": {"file":"crates/cli/src/default_scenarios/uni_v2.rs","line":15}
     }
   },
