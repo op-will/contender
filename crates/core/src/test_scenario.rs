@@ -1893,12 +1893,14 @@ where
     /// Nonces are (re)assigned at send time per address by `prepare_tx_request`,
     /// so the split need not preserve any cross-pool ordering beyond this.
     ///
-    /// `per_pool_txs` is how many txs EACH returned stream should hold. Because the
-    /// priority ratio can sit at 100% (a batch drawn entirely from one pool), each
-    /// stream must cover the whole run independently — so we generate
+    /// `per_pool_txs` is how many txs EACH returned stream should hold. The
+    /// composer adds priority on top of a constant full-rate normal baseline, so
+    /// over the whole run normal is drawn at the full rate every tick and priority
+    /// can be drawn at up to the full rate every tick (slider at 100%). Each
+    /// stream must therefore cover a full run independently — so we generate
     /// `per_pool_txs * 2` (the two steps split evenly) and hand back `per_pool_txs`
-    /// per pool. This is the "2x generation" cost: at slider extremes the unused
-    /// half of the opposite stream is discarded.
+    /// per pool. At sub-100% sliders the unused tail of the priority stream is
+    /// discarded at run end.
     pub async fn get_priority_normal_streams(
         &self,
         per_pool_txs: u64,

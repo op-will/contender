@@ -33,8 +33,13 @@ impl BatchComposer for ReplayComposer {
 }
 
 /// Blends two pre-generated, per-pool tx streams by a live priority ratio.
-/// Each call advances the priority cursor by `M = round(batch_size * pct/100)`
-/// and the normal cursor by `batch_size - M`, returning the concatenation.
+/// Normal traffic is a constant baseline: every tick draws a full `batch_size`
+/// from the normal stream regardless of the slider. The slider only adds
+/// priority traffic on top — each call also advances the priority cursor by
+/// `M = round(batch_size * pct/100)`, so the per-tick total is `batch_size + M`
+/// (at 100% that is `2 * batch_size`: full normal rate plus an equal priority
+/// rate). This models a fixed normal load with the slider controlling the
+/// *additional* priority load over the reserved-blockspace cap.
 ///
 /// Cursors only ever advance forward. Nonces are assigned later by
 /// `prepare_tx_request` from the live per-address nonce map (the streams' baked
@@ -67,8 +72,8 @@ impl PriorityRatioComposer {
     }
 
     /// `round(batch_size * pct / 100)`, with `pct` clamped to `[0, 100]`, so the
-    /// result is always in `[0, batch_size]` and `batch_size - result` cannot
-    /// underflow.
+    /// result is always in `[0, batch_size]`. This is the count of *additional*
+    /// priority txs added on top of the constant normal baseline.
     fn priority_count(batch_size: usize, pct: u8) -> usize {
         let pct = pct.min(100) as usize;
         ((batch_size * pct) + 50) / 100
@@ -79,7 +84,7 @@ impl BatchComposer for PriorityRatioComposer {
     fn compose(&mut self, _tick: u64) -> Vec<ExecutionRequest> {
         let pct = *self.priority_pct.borrow();
         let want_priority = Self::priority_count(self.batch_size, pct);
-        let want_normal = self.batch_size - want_priority;
+        let want_normal = self.batch_size;
 
         let mut batch = take(&self.priority_txs, &mut self.priority_cursor, want_priority);
         batch.extend(take(&self.normal_txs, &mut self.normal_cursor, want_normal));
@@ -150,7 +155,10 @@ mod tests {
     #[case(50, 6)]
     #[case(100, 11)]
     #[case(64, 7)]
-    fn priority_ratio_composer_blends_by_pct(#[case] pct: u8, #[case] expect_priority: usize) {
+    fn priority_ratio_composer_adds_priority_on_top_of_full_normal(
+        #[case] pct: u8,
+        #[case] expect_priority: usize,
+    ) {
         let batch = 11;
         let mut c = PriorityRatioComposer::new(
             stream(1000, batch * 4),
@@ -159,7 +167,8 @@ mod tests {
             watch_pct(pct),
         );
         let out = c.compose(0);
-        assert_eq!(out.len(), batch);
+        // Normal is a constant full-rate baseline; priority is added on top.
+        assert_eq!(out.len(), batch + expect_priority);
         let from_priority = out
             .iter()
             .filter(|r| match r {
@@ -169,7 +178,7 @@ mod tests {
             .count();
         assert_eq!(from_priority, expect_priority);
         assert_eq!(c.priority_cursor, expect_priority);
-        assert_eq!(c.normal_cursor, batch - expect_priority);
+        assert_eq!(c.normal_cursor, batch);
     }
 
     #[test]
@@ -180,11 +189,12 @@ mod tests {
     #[test]
     fn priority_ratio_composer_drains_gracefully() {
         let batch = 5;
-        // Only 3 priority txs available but pct=100 wants 5; should return the
-        // 3 remaining without panicking.
+        // Only 3 priority txs available but pct=100 wants 5; priority drains to
+        // the 3 remaining without panicking, while normal still supplies its
+        // full baseline of 5 — so the batch is 3 + 5 = 8.
         let mut c =
             PriorityRatioComposer::new(stream(0, 3), stream(100, 100), batch, watch_pct(100));
         let out = c.compose(0);
-        assert_eq!(out.len(), 3);
+        assert_eq!(out.len(), 8);
     }
 }
