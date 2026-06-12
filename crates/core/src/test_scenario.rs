@@ -64,6 +64,27 @@ use tracing::{debug, info, trace, warn};
 
 pub use alloy::transports::http::reqwest::Url;
 
+/// Per-transaction gas limit cap introduced by EIP-7825 (activated in the Osaka
+/// hard fork): 2^24 gas. A transaction whose gas limit exceeds this is invalid.
+const EIP_7825_MAX_TX_GAS_LIMIT: u64 = 1 << 24;
+
+/// Bounds a transaction request's `gas` field below the EIP-7825 per-tx gas cap
+/// before it is handed to `eth_estimateGas`.
+///
+/// On a chain that enforces EIP-7825, `eth_estimateGas` binary-searches for the
+/// gas limit using the block gas limit as its upper bound. When that block limit
+/// exceeds `EIP_7825_MAX_TX_GAS_LIMIT`, the first simulated execution is itself
+/// invalid and the node returns "intrinsic gas too high" instead of an estimate —
+/// so the call fails before any transaction is ever sent. Clamping the request's
+/// gas ceiling to the cap keeps the search within the valid range; the returned
+/// estimate is the true (smaller) gas the tx needs, so this never inflates the
+/// final gas limit.
+fn cap_gas_for_estimate(tx: &mut TransactionRequest) {
+    if tx.gas.is_none_or(|gas| gas > EIP_7825_MAX_TX_GAS_LIMIT) {
+        tx.gas = Some(EIP_7825_MAX_TX_GAS_LIMIT);
+    }
+}
+
 /// Fetch a u128 value via an async RPC call, caching on success and falling back
 /// to the cached value on transient failure.
 async fn fetch_with_cache<F, Fut, E>(
@@ -769,8 +790,10 @@ where
         } = extra_tx_params;
 
         // estimate gas limit
+        let mut estimate_req = tx_req.tx.to_owned();
+        cap_gas_for_estimate(&mut estimate_req);
         let gas_limit = provider
-            .estimate_gas(WithOtherFields::new(tx_req.tx.to_owned()))
+            .estimate_gas(WithOtherFields::new(estimate_req))
             .await?;
         debug!("estimated gas limit: {gas_limit}");
 
@@ -897,7 +920,9 @@ where
                     let gas_limit = if let Some(gas) = tx_req.tx.gas {
                         gas
                     } else {
-                        let res = provider.estimate_gas(tx_req.tx.to_owned().into()).await;
+                        let mut estimate_req = tx_req.tx.to_owned();
+                        cap_gas_for_estimate(&mut estimate_req);
+                        let res = provider.estimate_gas(estimate_req.into()).await;
                         if let Ok(res) = res {
                             res
                         } else {
@@ -1963,6 +1988,7 @@ where
                         }
                     }
                 }
+                cap_gas_for_estimate(&mut tx_req);
                 self.rpc_client
                     .estimate_gas(WithOtherFields::new(tx_req.to_owned()))
                     .await?
